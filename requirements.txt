@@ -1,0 +1,22 @@
+# Core dependencies
+numpy>=1.21.0
+opencv-python>=4.5.0
+pillow>=9.0.0
+
+# TensorFlow Lite for Raspberry Pi
+# Note: tflite-runtime is only available on Raspberry Pi/ARM systems
+# On Windows/development: tensorflow>=2.11.0
+
+# Audio output
+pyttsx3>=2.90
+pygame>=2.1.0
+
+# Configuration
+pyyaml>=6.0
+
+# Logging
+colorlog>=6.7.0
+
+# Raspberry Pi camera support
+# Note: picamera2 is only available on Raspberry Pi
+# On Windows/development: use opencv-python for camera access
