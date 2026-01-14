@@ -286,11 +286,15 @@ def create_announcement(detected_objects):
     """Generate and queue audio announcements for detections."""
     global last_announced
     
-    # Check ultrasonic sensor state if enabled
+    # Debug: Show what we're checking
     if args.ultrasonic_enable:
         with motion_lock:
+            print(f"[DEBUG] Ultrasonic check: motion_detected={motion_detected}, distance={current_distance}m, threshold={args.distance_threshold}m")
             if not motion_detected:
-                return  # Don't announce if no motion detected
+                print(f"[DEBUG] ❌ Skipping announcement - distance {current_distance}m > threshold {args.distance_threshold}m")
+                return
+            else:
+                print(f"[DEBUG] ✅ Proceeding with announcement - distance {current_distance}m <= threshold {args.distance_threshold}m")
     
     if args.no_audio or not detected_objects or AUDIO_METHOD == "none":
         return
