@@ -10,24 +10,15 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-# GPIO for ultrasonic sensor
-try:
-    from gpiozero import DistanceSensor
-    GPIOZERO_AVAILABLE = True
-    GPIO_AVAILABLE = False
-    print("✓ Using gpiozero for GPIO")
-except ImportError:
-    GPIOZERO_AVAILABLE = False
-    try:
-        import RPi.GPIO as GPIO
-        GPIO_AVAILABLE = True
-    except ImportError:
-        GPIO_AVAILABLE = False
-        print("Warning: No GPIO library available. Running without ultrasonic sensor.")
+import RPi.GPIO as GPIO
 
 # Audio library detection with improved error handling
 AUDIO_METHOD = "none"
 pyttsx3_engine = None
+
+# GPIO pins
+TRIG_PIN = 23
+ECHO_PIN = 24
 
 try:
     import pyttsx3
@@ -68,11 +59,6 @@ audio_lock = threading.Lock()
 last_announced = {}
 announcement_cooldown = 3.0
 
-# Ultrasonic sensor state
-motion_detected = False
-motion_lock = threading.Lock()
-current_distance = None
-
 # Define and parse user input arguments
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', help='Path to YOLO model file (example: "runs/detect/train/weights/best.pt")',
@@ -95,15 +81,6 @@ parser.add_argument('--announce-all', help='Announce all detected objects indivi
                     action='store_true')
 parser.add_argument('--audio-method', choices=['pyttsx3', 'gtts', 'espeak', 'auto'], default='auto',
                     help='Force specific audio method (default: auto)')
-# Ultrasonic sensor options
-parser.add_argument('--ultrasonic-enable', action='store_true',
-                    help='Enable ultrasonic sensor trigger')
-parser.add_argument('--trig-pin', type=int, default=23,
-                    help='GPIO pin for ultrasonic TRIG (default: 23)')
-parser.add_argument('--echo-pin', type=int, default=24,
-                    help='GPIO pin for ultrasonic ECHO (default: 24)')
-parser.add_argument('--distance-threshold', type=float, default=1.0,
-                    help='Distance threshold in meters to trigger audio (default: 1.0)')
 
 args = parser.parse_args()
 
@@ -115,121 +92,67 @@ user_res = args.resolution
 record = args.record
 announcement_cooldown = args.audio_cooldown
 
+
+def setup_sensor():
+    """Setup GPIO pins for ultrasonic sensor."""
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(TRIG_PIN, GPIO.OUT)
+    GPIO.setup(ECHO_PIN, GPIO.IN)
+    GPIO.output(TRIG_PIN, False)
+    print(f"Sensor setup complete. TRIG: GPIO{TRIG_PIN}, ECHO: GPIO{ECHO_PIN}")
+    time.sleep(0.5)  # Allow sensor to settle
+    
+def measure_distance():
+    """Measure distance with timeout protection."""
+    try:
+        # Ensure trigger is low
+        GPIO.output(TRIG_PIN, False)
+        time.sleep(0.01)
+        
+        # Send 10us pulse
+        GPIO.output(TRIG_PIN, True)
+        time.sleep(0.00001)
+        GPIO.output(TRIG_PIN, False)
+        
+        # Wait for echo start with timeout
+        timeout = time.time() + 0.1  # 100ms timeout
+        while GPIO.input(ECHO_PIN) == 0:
+            pulse_start = time.time()
+            if time.time() > timeout:
+                print("⚠️  Timeout waiting for echo start (ECHO stuck LOW)")
+                return None
+        
+        # Wait for echo end with timeout
+        timeout = time.time() + 0.1
+        while GPIO.input(ECHO_PIN) == 1:
+            pulse_end = time.time()
+            if time.time() > timeout:
+                print("⚠️  Timeout waiting for echo end (ECHO stuck HIGH)")
+                # Force reset
+                GPIO.setup(ECHO_PIN, GPIO.OUT)
+                GPIO.output(ECHO_PIN, False)
+                time.sleep(0.01)
+                GPIO.setup(ECHO_PIN, GPIO.IN)
+                return None
+        
+        # Calculate distance
+        pulse_duration = pulse_end - pulse_start
+        distance_cm = (pulse_duration * 34300) / 2
+        
+        # Filter invalid readings
+        if distance_cm < 2 or distance_cm > 400:
+            return None
+        
+        return distance_cm
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        return None
+    
 # Override audio method if specified
 if args.audio_method != 'auto':
     AUDIO_METHOD = args.audio_method
     print(f"Using forced audio method: {AUDIO_METHOD}")
-
-# Global sensor object
-ultrasonic_sensor = None
-
-def setup_ultrasonic_sensor(trig_pin, echo_pin):
-    """Setup GPIO pins for ultrasonic sensor."""
-    if not GPIO_AVAILABLE:
-        return False
-    
-    try:
-        # Try BCM mode first
-        try:
-            GPIO.setmode(GPIO.BCM)
-        except:
-            # If BCM fails, try BOARD mode
-            try:
-                GPIO.setmode(GPIO.BOARD)
-                print("Note: Using BOARD pin numbering mode")
-            except:
-                pass
-        
-        GPIO.setwarnings(False)
-        GPIO.setup(trig_pin, GPIO.OUT)
-        GPIO.setup(echo_pin, GPIO.IN)
-        GPIO.output(trig_pin, False)
-        time.sleep(0.5)  # Allow sensor to settle
-        print(f"✓ Ultrasonic sensor initialized on GPIO {trig_pin} (TRIG) and {echo_pin} (ECHO)")
-        return True
-    except Exception as e:
-        print(f"✗ Failed to setup ultrasonic sensor: {e}")
-        print("   Trying alternative GPIO library...")
-        return False
-
-
-def measure_distance(trig_pin, echo_pin, max_attempts=3):
-    """Measure distance using ultrasonic sensor. Returns distance in meters."""
-    global ultrasonic_sensor
-    
-    if GPIOZERO_AVAILABLE and ultrasonic_sensor:
-        try:
-            distance = ultrasonic_sensor.distance
-            if distance and 0.02 < distance < 4.0:
-                return distance
-        except Exception as e:
-            print(f"Sensor error: {e}")
-        return None
-    
-    if not GPIO_AVAILABLE:
-        return 0.5  # Default to active for testing without sensor
-    
-    for attempt in range(max_attempts):
-        try:
-            GPIO.output(trig_pin, False)
-            time.sleep(0.05)
-            
-            GPIO.output(trig_pin, True)
-            time.sleep(0.00001)
-            GPIO.output(trig_pin, False)
-            
-            timeout_start = time.time()
-            pulse_start = timeout_start
-            
-            while GPIO.input(echo_pin) == 0:
-                pulse_start = time.time()
-                if pulse_start - timeout_start > 0.1:
-                    break
-            
-            pulse_end = time.time()
-            while GPIO.input(echo_pin) == 1:
-                pulse_end = time.time()
-                if pulse_end - pulse_start > 0.1:
-                    break
-            
-            pulse_duration = pulse_end - pulse_start
-            distance_cm = pulse_duration * 17150
-            distance_m = distance_cm / 100
-            
-            if 0.02 < distance_m < 4.0:
-                return distance_m
-            
-            time.sleep(0.05)
-            
-        except Exception as e:
-            if attempt == max_attempts - 1:
-                print(f"Sensor error: {e}")
-            time.sleep(0.05)
-    
-    return None
-
-
-def ultrasonic_monitor(trig_pin, echo_pin, threshold_distance):
-    """Background thread to monitor ultrasonic sensor."""
-    global motion_detected, current_distance
-    
-    print(f"🔍 Ultrasonic monitoring started (threshold: {threshold_distance}m)")
-    
-    while True:
-        distance = measure_distance(trig_pin, echo_pin)
-        
-        if distance is not None:
-            with motion_lock:
-                current_distance = distance
-                was_detected = motion_detected
-                motion_detected = distance <= threshold_distance
-                
-                if motion_detected and not was_detected:
-                    print(f"⚡ Motion detected at {distance:.2f}m - Audio enabled")
-                elif not motion_detected and was_detected:
-                    print(f"💤 Motion cleared ({distance:.2f}m) - Audio disabled")
-        
-        time.sleep(0.2)  # Check every 200ms
 
 
 def speak_announcement(text):
@@ -312,16 +235,6 @@ def create_announcement(detected_objects):
     """Generate and queue audio announcements for detections."""
     global last_announced
     
-    # Debug: Show what we're checking
-    if args.ultrasonic_enable:
-        with motion_lock:
-            print(f"[DEBUG] Ultrasonic check: motion_detected={motion_detected}, distance={current_distance}m, threshold={args.distance_threshold}m")
-            if not motion_detected:
-                print(f"[DEBUG] ❌ Skipping announcement - distance {current_distance}m > threshold {args.distance_threshold}m")
-                return
-            else:
-                print(f"[DEBUG] ✅ Proceeding with announcement - distance {current_distance}m <= threshold {args.distance_threshold}m")
-    
     if args.no_audio or not detected_objects or AUDIO_METHOD == "none":
         return
     
@@ -355,7 +268,7 @@ def create_announcement(detected_objects):
             # Limit queue to prevent backlog
             if len(audio_queue) < 3:
                 audio_queue.append(full_message)
-        print(f"🚨 [AUDIO] {full_message}")
+        print(f"[AUDIO] {full_message}")
 
 
 # Check if model file exists and is valid
@@ -377,40 +290,14 @@ if not args.no_audio:
         print("   Note: Requires internet connection")
         print("   Install player: sudo apt-get install mpg123")
     print(f"   Cooldown: {announcement_cooldown}s")
-    print(f"   Mode: {'All objects' if args.announce_all else 'Total count only'}")
+    print(f"   Mode: {'All objects' if args.announce_all else 'Total count only'}\n")
     
     # Start audio processing thread
     if AUDIO_METHOD != "none":
         audio_thread = threading.Thread(target=process_audio_queue, daemon=True)
         audio_thread.start()
 else:
-    print("🔇 Audio disabled")
-
-# Setup ultrasonic sensor
-if args.ultrasonic_enable:
-    print(f"\n📡 Ultrasonic Sensor Configuration:")
-    print(f"   TRIG Pin: GPIO {args.trig_pin}")
-    print(f"   ECHO Pin: GPIO {args.echo_pin}")
-    print(f"   Distance Threshold: {args.distance_threshold}m")
-    print(f"   ⚠️ IMPORTANT: Use voltage divider for ECHO pin (5V → 3.3V)")
-    
-    if setup_ultrasonic_sensor(args.trig_pin, args.echo_pin):
-        # Start ultrasonic monitoring thread
-        sensor_thread = threading.Thread(
-            target=ultrasonic_monitor,
-            args=(args.trig_pin, args.echo_pin, args.distance_threshold),
-            daemon=True
-        )
-        sensor_thread.start()
-    else:
-        print("⚠️  Running without ultrasonic sensor - audio always enabled")
-        args.ultrasonic_enable = False
-        motion_detected = True
-else:
-    print("\n⚠️  Ultrasonic sensor disabled - audio always enabled")
-    motion_detected = True
-
-print("\n")
+    print("🔇 Audio disabled\n")
 
 # Load the model into memory and get labemap
 model = YOLO(model_path, task='detect')
@@ -449,7 +336,7 @@ if user_res:
 
 # Check if recording is valid and set up recording
 if record:
-    if source_type not in ['video','usb','picamera']:
+    if source_type not in ['video','usb']:
         print('Recording only works for video and camera sources. Please try again.')
         sys.exit(0)
     if not user_res:
@@ -498,139 +385,130 @@ frame_rate_buffer = []
 fps_avg_len = 200
 img_count = 0
 
-print("Starting detection...")
-if args.ultrasonic_enable:
-    print(f"Audio triggers when motion detected within {args.distance_threshold}m")
-print("Press 'q' to quit, 's' to pause, 'p' to save screenshot\n")
+setup_sensor()
+    
+successful = 0
+failed = 0
 
 # Begin inference loop
-try:
-    while True:
+while True:
 
-        t_start = time.perf_counter()
-
-        # Load frame from image source
-        if source_type == 'image' or source_type == 'folder':
-            if img_count >= len(imgs_list):
-                print('All images have been processed. Exiting program.')
-                sys.exit(0)
-            img_filename = imgs_list[img_count]
-            frame = cv2.imread(img_filename)
-            img_count = img_count + 1
-        
-        elif source_type == 'video':
-            ret, frame = cap.read()
-            if not ret:
-                print('Reached end of the video file. Exiting program.')
-                break
-        
-        elif source_type == 'usb':
-            ret, frame = cap.read()
-            if (frame is None) or (not ret):
-                print('Unable to read frames from the camera. This indicates the camera is disconnected or not working. Exiting program.')
-                break
-
-        elif source_type == 'picamera':
-            frame = cap.capture_array()
-            if (frame is None):
-                print('Unable to read frames from the Picamera. This indicates the camera is disconnected or not working. Exiting program.')
-                break
-
-        # Resize frame to desired display resolution
-        if resize == True:
-            frame = cv2.resize(frame,(resW,resH))
-
-        # Run inference on frame
-        results = model(frame, verbose=False)
-
-        # Extract results
-        detections = results[0].boxes
-
-        # Track object counts
-        object_count = 0
-        detected_objects = defaultdict(int)
-
-        # Go through each detection and get bbox coords, confidence, and class
-        for i in range(len(detections)):
-
-            # Get bounding box coordinates
-            xyxy_tensor = detections[i].xyxy.cpu()
-            xyxy = xyxy_tensor.numpy().squeeze()
-            xmin, ymin, xmax, ymax = xyxy.astype(int)
-
-            # Get bounding box class ID and name
-            classidx = int(detections[i].cls.item())
-            classname = labels[classidx]
-
-            # Get bounding box confidence
-            conf = detections[i].conf.item()
-
-            # Draw box if confidence threshold is high enough
-            if conf > min_thresh:
-
-                color = bbox_colors[classidx % 10]
-                cv2.rectangle(frame, (xmin,ymin), (xmax,ymax), color, 2)
-
-                label = f'{classname}: {int(conf*100)}%'
-                labelSize, baseLine = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                label_ymin = max(ymin, labelSize[1] + 10)
-                cv2.rectangle(frame, (xmin, label_ymin-labelSize[1]-10), (xmin+labelSize[0], label_ymin+baseLine-10), color, cv2.FILLED)
-                cv2.putText(frame, label, (xmin, label_ymin-7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-
-                # Count objects
-                object_count = object_count + 1
-                detected_objects[classname] += 1
-
-        # Generate audio announcement for detected objects
-        create_announcement(detected_objects)
-
-        # Display sensor status if enabled
-        if args.ultrasonic_enable:
-            with motion_lock:
-                status_text = f"Motion: {'YES' if motion_detected else 'NO'}"
-                if current_distance is not None:
-                    status_text += f" ({current_distance:.2f}m)"
-                status_color = (0, 255, 0) if motion_detected else (128, 128, 128)
-            cv2.putText(frame, status_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, .7, status_color, 2)
-
-        # Calculate and draw framerate
-        if source_type == 'video' or source_type == 'usb' or source_type == 'picamera':
-            cv2.putText(frame, f'FPS: {avg_frame_rate:0.2f}', (10,20), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
-        
-        # Display detection results
-        cv2.putText(frame, f'Objects: {object_count}', (10,40), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
-        cv2.imshow('YOLO detection results',frame)
-        if record: recorder.write(frame)
-
-        # Handle key presses
-        if source_type == 'image' or source_type == 'folder':
-            key = cv2.waitKey()
-        elif source_type == 'video' or source_type == 'usb' or source_type == 'picamera':
-            key = cv2.waitKey(5)
-        
-        if key == ord('q') or key == ord('Q'):
+    t_start = time.perf_counter()
+    
+    # Load frame from image source
+    if source_type == 'image' or source_type == 'folder':
+        if img_count >= len(imgs_list):
+            print('All images have been processed. Exiting program.')
+            sys.exit(0)
+        img_filename = imgs_list[img_count]
+        frame = cv2.imread(img_filename)
+        img_count = img_count + 1
+    
+    elif source_type == 'video':
+        ret, frame = cap.read()
+        if not ret:
+            print('Reached end of the video file. Exiting program.')
             break
-        elif key == ord('s') or key == ord('S'):
-            cv2.waitKey()
-        elif key == ord('p') or key == ord('P'):
-            cv2.imwrite('capture.png',frame)
-        
-        # Calculate FPS
-        t_stop = time.perf_counter()
-        frame_rate_calc = float(1/(t_stop - t_start))
+    
+    elif source_type == 'usb':
+        ret, frame = cap.read()
+        if (frame is None) or (not ret):
+            print('Unable to read frames from the camera. This indicates the camera is disconnected or not working. Exiting program.')
+            break
 
-        # Update FPS buffer
-        if len(frame_rate_buffer) >= fps_avg_len:
-            temp = frame_rate_buffer.pop(0)
-            frame_rate_buffer.append(frame_rate_calc)
-        else:
-            frame_rate_buffer.append(frame_rate_calc)
+    elif source_type == 'picamera':
+        frame = cap.capture_array()
+        if (frame is None):
+            print('Unable to read frames from the Picamera. This indicates the camera is disconnected or not working. Exiting program.')
+            break
 
-        # Calculate average FPS
-        avg_frame_rate = np.mean(frame_rate_buffer)
+    # Resize frame to desired display resolution
+    if resize == True:
+        frame = cv2.resize(frame,(resW,resH))
 
-except KeyboardInterrupt:
-    print("\n\nStopping...")
+    # Run inference on frame
+    results = model(frame, verbose=False)
+
+    # Extract results
+    detections = results[0].boxes
+
+    # Track object counts
+    object_count = 0
+    detected_objects = defaultdict(int)
+
+    # Go through each detection and get bbox coords, confidence, and class
+    for i in range(len(detections)):
+
+        # Get bounding box coordinates
+        xyxy_tensor = detections[i].xyxy.cpu()
+        xyxy = xyxy_tensor.numpy().squeeze()
+        xmin, ymin, xmax, ymax = xyxy.astype(int)
+
+        # Get bounding box class ID and name
+        classidx = int(detections[i].cls.item())
+        classname = labels[classidx]
+
+        # Get bounding box confidence
+        conf = detections[i].conf.item()
+
+        # Draw box if confidence threshold is high enough
+        if conf > min_thresh:
+
+            color = bbox_colors[classidx % 10]
+            cv2.rectangle(frame, (xmin,ymin), (xmax,ymax), color, 2)
+
+            label = f'{classname}: {int(conf*100)}%'
+            labelSize, baseLine = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            label_ymin = max(ymin, labelSize[1] + 10)
+            cv2.rectangle(frame, (xmin, label_ymin-labelSize[1]-10), (xmin+labelSize[0], label_ymin+baseLine-10), color, cv2.FILLED)
+            cv2.putText(frame, label, (xmin, label_ymin-7), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+
+            # Count objects
+            object_count = object_count + 1
+            detected_objects[classname] += 1
+    
+    distance = measure_distance()
+    
+    if distance < 100:
+        # Generate audio announcement for detected objects
+        create_announcement(detected_objects)    
+
+    # Calculate and draw framerate
+    if source_type == 'video' or source_type == 'usb' or source_type == 'picamera':
+        cv2.putText(frame, f'FPS: {avg_frame_rate:0.2f}', (10,20), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
+    
+    # Display detection results
+    cv2.putText(frame, f'Number of objects: {object_count}', (10,40), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
+    cv2.imshow('YOLO detection results',frame)
+    if record: recorder.write(frame)
+
+    # Handle key presses
+    if source_type == 'image' or source_type == 'folder':
+        key = cv2.waitKey()
+    elif source_type == 'video' or source_type == 'usb' or source_type == 'picamera':
+        key = cv2.waitKey(5)
+    
+    if key == ord('q') or key == ord('Q'):
+        break
+    elif key == ord('s') or key == ord('S'):
+        cv2.waitKey()
+    elif key == ord('p') or key == ord('P'):
+        cv2.imwrite('capture.png',frame)
+    
+    # Calculate FPS
+    t_stop = time.perf_counter()
+    frame_rate_calc = float(1/(t_stop - t_start))
+
+    # Update FPS buffer
+    if len(frame_rate_buffer) >= fps_avg_len:
+        temp = frame_rate_buffer.pop(0)
+        frame_rate_buffer.append(frame_rate_calc)
+    else:
+        frame_rate_buffer.append(frame_rate_calc)
+
+    # Calculate average FPS
+    avg_frame_rate = np.mean(frame_rate_buffer)
+
 
 # Clean up
 print(f'Average pipeline FPS: {avg_frame_rate:.2f}')
@@ -639,6 +517,4 @@ if source_type == 'video' or source_type == 'usb':
 elif source_type == 'picamera':
     cap.stop()
 if record: recorder.release()
-if args.ultrasonic_enable and GPIO_AVAILABLE:
-    GPIO.cleanup()
 cv2.destroyAllWindows()
