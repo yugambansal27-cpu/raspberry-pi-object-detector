@@ -10,17 +10,42 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-# Audio library detection
+# Audio library detection with improved error handling
+AUDIO_METHOD = "none"
+pyttsx3_engine = None
+
 try:
     import pyttsx3
-    AUDIO_METHOD = "pyttsx3"
+    # Try to initialize pyttsx3 early to catch errors
+    try:
+        test_engine = pyttsx3.init()
+        # Try to set a voice to test if it works
+        voices = test_engine.getProperty('voices')
+        if voices:
+            test_engine.setProperty('voice', voices[0].id)
+        test_engine.stop()
+        AUDIO_METHOD = "pyttsx3"
+        print("✓ pyttsx3 initialized successfully")
+    except Exception as e:
+        print(f"pyttsx3 available but failed to initialize: {e}")
+        raise ImportError
 except ImportError:
     try:
         from gtts import gTTS
         AUDIO_METHOD = "gtts"
+        print("✓ Using gTTS for audio")
     except ImportError:
-        import subprocess
-        AUDIO_METHOD = "espeak"
+        try:
+            import subprocess
+            # Test if espeak is available
+            result = subprocess.run(['which', 'espeak'], capture_output=True)
+            if result.returncode == 0:
+                AUDIO_METHOD = "espeak"
+                print("✓ Using espeak for audio")
+            else:
+                print("⚠️ No audio method available. Install: sudo apt-get install espeak")
+        except:
+            print("⚠️ No audio method available")
 
 # Audio state management
 audio_queue = []
@@ -48,6 +73,8 @@ parser.add_argument('--audio-cooldown', type=float, default=3.0,
                     help='Seconds between announcements for same object (default: 3.0)')
 parser.add_argument('--announce-all', help='Announce all detected objects individually (default: only total count)',
                     action='store_true')
+parser.add_argument('--audio-method', choices=['pyttsx3', 'gtts', 'espeak', 'auto'], default='auto',
+                    help='Force specific audio method (default: auto)')
 
 args = parser.parse_args()
 
@@ -59,36 +86,70 @@ user_res = args.resolution
 record = args.record
 announcement_cooldown = args.audio_cooldown
 
+# Override audio method if specified
+if args.audio_method != 'auto':
+    AUDIO_METHOD = args.audio_method
+    print(f"Using forced audio method: {AUDIO_METHOD}")
+
 
 def speak_announcement(text):
     """Convert text to speech using available method."""
-    if args.no_audio:
+    if args.no_audio or AUDIO_METHOD == "none":
         return
     
     if AUDIO_METHOD == "pyttsx3":
         try:
-            speech_engine = pyttsx3.init()
-            speech_engine.setProperty('rate', 150)
-            speech_engine.say(text)
-            speech_engine.runAndWait()
+            # Create a fresh engine for each announcement to avoid state issues
+            engine = pyttsx3.init()
+            
+            # Configure engine with safe settings for Raspberry Pi
+            engine.setProperty('rate', 150)
+            engine.setProperty('volume', 0.9)
+            
+            # Try to use the first available voice
+            voices = engine.getProperty('voices')
+            if voices:
+                # Use first voice (usually more reliable on Pi)
+                engine.setProperty('voice', voices[0].id)
+            
+            engine.say(text)
+            engine.runAndWait()
+            engine.stop()
+            del engine  # Clean up
+            
         except Exception as err:
-            print(f"Audio error: {err}")
+            print(f"pyttsx3 error: {err}")
+            print("Falling back to espeak...")
+            # Fallback to espeak
+            try:
+                subprocess.run(['espeak', text], 
+                             stdout=subprocess.DEVNULL, 
+                             stderr=subprocess.DEVNULL)
+            except:
+                pass
     
     elif AUDIO_METHOD == "gtts":
         try:
             audio_obj = gTTS(text=text, lang='en', slow=False)
             audio_obj.save("/tmp/detection.mp3")
-            os.system("mpg123 -q /tmp/detection.mp3 2>/dev/null")
+            # Try multiple players
+            for player in ['mpg123', 'mpg321', 'ffplay']:
+                result = subprocess.run(['which', player], capture_output=True)
+                if result.returncode == 0:
+                    subprocess.run([player, '-q', '/tmp/detection.mp3'], 
+                                 stdout=subprocess.DEVNULL, 
+                                 stderr=subprocess.DEVNULL)
+                    break
         except Exception as err:
-            print(f"Audio error: {err}")
+            print(f"gTTS error: {err}")
     
-    else:  # espeak fallback
+    elif AUDIO_METHOD == "espeak":
         try:
             subprocess.run(['espeak', text], 
                          stdout=subprocess.DEVNULL, 
                          stderr=subprocess.DEVNULL)
         except Exception as err:
-            print(f"Audio error: {err}")
+            print(f"espeak error: {err}")
 
 
 def process_audio_queue():
@@ -111,7 +172,7 @@ def create_announcement(detected_objects):
     """Generate and queue audio announcements for detections."""
     global last_announced
     
-    if args.no_audio or not detected_objects:
+    if args.no_audio or not detected_objects or AUDIO_METHOD == "none":
         return
     
     current_time = time.time()
@@ -154,16 +215,24 @@ if (not os.path.exists(model_path)):
 
 # Display audio configuration
 if not args.no_audio:
-    print(f"🔊 Audio method: {AUDIO_METHOD}")
-    if AUDIO_METHOD == "espeak":
-        print("   Note: Install pyttsx3 or gtts for better quality")
-        print("   Run: pip install pyttsx3")
+    print(f"\n🔊 Audio Configuration:")
+    print(f"   Method: {AUDIO_METHOD}")
+    if AUDIO_METHOD == "none":
+        print("   ⚠️ No audio available. To enable:")
+        print("      sudo apt-get install espeak")
+        print("      pip install pyttsx3")
+    elif AUDIO_METHOD == "espeak":
+        print("   Note: For better quality, install: pip install pyttsx3")
+    elif AUDIO_METHOD == "gtts":
+        print("   Note: Requires internet connection")
+        print("   Install player: sudo apt-get install mpg123")
     print(f"   Cooldown: {announcement_cooldown}s")
     print(f"   Mode: {'All objects' if args.announce_all else 'Total count only'}\n")
     
     # Start audio processing thread
-    audio_thread = threading.Thread(target=process_audio_queue, daemon=True)
-    audio_thread.start()
+    if AUDIO_METHOD != "none":
+        audio_thread = threading.Thread(target=process_audio_queue, daemon=True)
+        audio_thread.start()
 else:
     print("🔇 Audio disabled\n")
 
