@@ -12,11 +12,18 @@ from ultralytics import YOLO
 
 # GPIO for ultrasonic sensor
 try:
-    import RPi.GPIO as GPIO
-    GPIO_AVAILABLE = True
-except ImportError:
+    from gpiozero import DistanceSensor
+    GPIOZERO_AVAILABLE = True
     GPIO_AVAILABLE = False
-    print("Warning: RPi.GPIO not available. Running without ultrasonic sensor.")
+    print("✓ Using gpiozero for GPIO")
+except ImportError:
+    GPIOZERO_AVAILABLE = False
+    try:
+        import RPi.GPIO as GPIO
+        GPIO_AVAILABLE = True
+    except ImportError:
+        GPIO_AVAILABLE = False
+        print("Warning: No GPIO library available. Running without ultrasonic sensor.")
 
 # Audio library detection with improved error handling
 AUDIO_METHOD = "none"
@@ -113,6 +120,8 @@ if args.audio_method != 'auto':
     AUDIO_METHOD = args.audio_method
     print(f"Using forced audio method: {AUDIO_METHOD}")
 
+# Global sensor object
+ultrasonic_sensor = None
 
 def setup_ultrasonic_sensor(trig_pin, echo_pin):
     """Setup GPIO pins for ultrasonic sensor."""
@@ -120,7 +129,17 @@ def setup_ultrasonic_sensor(trig_pin, echo_pin):
         return False
     
     try:
-        GPIO.setmode(GPIO.BCM)
+        # Try BCM mode first
+        try:
+            GPIO.setmode(GPIO.BCM)
+        except:
+            # If BCM fails, try BOARD mode
+            try:
+                GPIO.setmode(GPIO.BOARD)
+                print("Note: Using BOARD pin numbering mode")
+            except:
+                pass
+        
         GPIO.setwarnings(False)
         GPIO.setup(trig_pin, GPIO.OUT)
         GPIO.setup(echo_pin, GPIO.IN)
@@ -130,50 +149,57 @@ def setup_ultrasonic_sensor(trig_pin, echo_pin):
         return True
     except Exception as e:
         print(f"✗ Failed to setup ultrasonic sensor: {e}")
+        print("   Trying alternative GPIO library...")
         return False
 
 
 def measure_distance(trig_pin, echo_pin, max_attempts=3):
     """Measure distance using ultrasonic sensor. Returns distance in meters."""
+    global ultrasonic_sensor
+    
+    if GPIOZERO_AVAILABLE and ultrasonic_sensor:
+        try:
+            distance = ultrasonic_sensor.distance
+            if distance and 0.02 < distance < 4.0:
+                return distance
+        except Exception as e:
+            print(f"Sensor error: {e}")
+        return None
+    
     if not GPIO_AVAILABLE:
         return 0.5  # Default to active for testing without sensor
     
     for attempt in range(max_attempts):
         try:
-            # Ensure trigger is low
             GPIO.output(trig_pin, False)
             time.sleep(0.05)
             
-            # Send 10us pulse
             GPIO.output(trig_pin, True)
             time.sleep(0.00001)
             GPIO.output(trig_pin, False)
             
-            # Wait for echo
             timeout_start = time.time()
             pulse_start = timeout_start
             
             while GPIO.input(echo_pin) == 0:
                 pulse_start = time.time()
-                if pulse_start - timeout_start > 0.1:  # 100ms timeout
+                if pulse_start - timeout_start > 0.1:
                     break
             
             pulse_end = time.time()
             while GPIO.input(echo_pin) == 1:
                 pulse_end = time.time()
-                if pulse_end - pulse_start > 0.1:  # 100ms timeout
+                if pulse_end - pulse_start > 0.1:
                     break
             
-            # Calculate distance
             pulse_duration = pulse_end - pulse_start
-            distance_cm = pulse_duration * 17150  # Speed of sound / 2
+            distance_cm = pulse_duration * 17150
             distance_m = distance_cm / 100
             
-            # Validate reading
             if 0.02 < distance_m < 4.0:
                 return distance_m
             
-            time.sleep(0.05)  # Wait before retry
+            time.sleep(0.05)
             
         except Exception as e:
             if attempt == max_attempts - 1:
