@@ -208,9 +208,12 @@ def speak_announcement(text):
     
     elif AUDIO_METHOD == "espeak":
         try:
-            subprocess.run(['espeak', text], 
+            subprocess.run(['espeak', '-w', '/tmp/speech.wav', text],                         
                          stdout=subprocess.DEVNULL, 
                          stderr=subprocess.DEVNULL)
+            subprocess.run(['aplay', '-D', 'plughw:2,0', '/tmp/speech.wav'],
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)            
         except Exception as err:
             print(f"espeak error: {err}")
 
