@@ -477,40 +477,40 @@ while True:
         create_announcement(detected_objects)    
 
     # Calculate and draw framerate
-    if source_type == 'video' or source_type == 'usb' or source_type == 'picamera':
-        cv2.putText(frame, f'FPS: {avg_frame_rate:0.2f}', (10,20), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
+    #if source_type == 'video' or source_type == 'usb' or source_type == 'picamera':
+    #    cv2.putText(frame, f'FPS: {avg_frame_rate:0.2f}', (10,20), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
     
     # Display detection results
-    cv2.putText(frame, f'Number of objects: {object_count}', (10,40), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
-    cv2.imshow('YOLO detection results',frame)
-    if record: recorder.write(frame)
+    #cv2.putText(frame, f'Number of objects: {object_count}', (10,40), cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
+    #cv2.imshow('YOLO detection results',frame)
+    #if record: recorder.write(frame)
 
     # Handle key presses
-    if source_type == 'image' or source_type == 'folder':
-        key = cv2.waitKey()
-    elif source_type == 'video' or source_type == 'usb' or source_type == 'picamera':
-        key = cv2.waitKey(5)
+    #if source_type == 'image' or source_type == 'folder':
+    #    key = cv2.waitKey()
+    #elif source_type == 'video' or source_type == 'usb' or source_type == 'picamera':
+    #    key = cv2.waitKey(5)
     
-    if key == ord('q') or key == ord('Q'):
-        break
-    elif key == ord('s') or key == ord('S'):
-        cv2.waitKey()
-    elif key == ord('p') or key == ord('P'):
-        cv2.imwrite('capture.png',frame)
+    #if key == ord('q') or key == ord('Q'):
+    #    break
+    #elif key == ord('s') or key == ord('S'):
+    #    cv2.waitKey()
+    #elif key == ord('p') or key == ord('P'):
+    #    cv2.imwrite('capture.png',frame)
     
     # Calculate FPS
-    t_stop = time.perf_counter()
-    frame_rate_calc = float(1/(t_stop - t_start))
+    #t_stop = time.perf_counter()
+    #frame_rate_calc = float(1/(t_stop - t_start))
 
     # Update FPS buffer
-    if len(frame_rate_buffer) >= fps_avg_len:
-        temp = frame_rate_buffer.pop(0)
-        frame_rate_buffer.append(frame_rate_calc)
-    else:
-        frame_rate_buffer.append(frame_rate_calc)
+    #if len(frame_rate_buffer) >= fps_avg_len:
+    #    temp = frame_rate_buffer.pop(0)
+    #    frame_rate_buffer.append(frame_rate_calc)
+    #else:
+    #    frame_rate_buffer.append(frame_rate_calc)
 
     # Calculate average FPS
-    avg_frame_rate = np.mean(frame_rate_buffer)
+    #avg_frame_rate = np.mean(frame_rate_buffer)
 
 
 # Clean up
